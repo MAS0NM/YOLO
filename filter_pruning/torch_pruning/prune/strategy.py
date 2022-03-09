@@ -7,6 +7,7 @@ Date: 2022-02-18 10:03:28
 LastEditors: username
 LastEditTime: 2022-02-18 15:39:11
 '''
+from numpy import indices
 import torch
 from abc import abstractclassmethod, ABC
 from typing import Sequence
@@ -26,14 +27,32 @@ class BaseStrategy(ABC):
 
     @abstractclassmethod
     def apply(self, weights, amount=0.0, round_to=1)->  Sequence[int]:  # return index
-        """ Apply the strategy on weights with user specified pruning percentage.
+        # """ Apply the strategy on weights with user specified pruning percentage.
 
-        Parameters:
-            weights (torch.Parameter): weights to be pruned.
-            amount (Callable): the percentage of weights to be pruned (amount<1.0) or the amount of weights to be pruned (amount>=1.0) 
-            round_to (int): the number to which the number of pruned channels is rounded.
-        """
+        # Parameters:
+        #     weights (torch.Parameter): weights to be pruned.
+        #     amount (Callable): the percentage of weights to be pruned (amount<1.0) or the amount of weights to be pruned (amount>=1.0) 
+        #     round_to (int): the number to which the number of pruned channels is rounded.
+        # """
         raise NotImplementedError
+    
+class GeometricMedian(BaseStrategy):
+    
+    def __init__(self, model):
+        self.model_size = {}
+        self.model_length = {}
+        self.compress_rate = {}
+        self.distance_rate = {}
+        self.mat = {}
+        self.model = model
+        self.mask_index = []
+        self.filter_small_index = {}
+        self.filter_large_index = {}
+        self.similar_matrix = {}
+        self.norm_matrix = {}
+        
+    def apply(self, weights, amount=0.0, round_to=1)-> Sequence[int]:  #return index
+        return indices
 
 class RandomStrategy(BaseStrategy):
 
