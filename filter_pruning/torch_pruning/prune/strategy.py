@@ -41,66 +41,47 @@ class BaseStrategy(ABC):
 class GeometricMedian(BaseStrategy):
     
     def __init__(self, model):
-        self.model_size = {}
-        self.model_length = {}
+        self.model_size = {}    #每一层的4维卷积参数形状
+        self.model_length = {}  #每一层的参数vector长度
         self.compress_rate = {}
         self.distance_rate = {}
-        self.mat = {}
         self.model = model
         self.mask_index = []
-        self.filter_small_index = {}
         self.filter_large_index = {}
         self.similar_matrix = {}
-        self.norm_matrix = {}
-        
-    def get_filter_codebook(self, weight_torch, compress_rate, length):
+    
+    def get_filter_similar(self, weights, compress_rate, distance_rate, length, mix=False, dist_type="l2"):
         '''
-            weight_torch: model.parameters()[index].data
+            weights: torch.nn.parameter.Parameter
             length: model_length[index]
-            weight_torch.size()
+            weights.size(): out_channel, in_channel, w, h
         '''
         codebook = np.ones(length)
-        if len(weight_torch.size()) == 4:
-            filter_pruned_num = int(weight_torch.size()[0] * (1 - compress_rate))
-            weight_vec = weight_torch.view(weight_torch.size()[0], -1)
-            norm2 = torch.norm(weight_vec, 2, 1)
-            norm2_np = norm2.cpu().numpy()
-            filter_index = norm2_np.argsort()[:filter_pruned_num]
-            #            norm1_sort = np.sort(norm1_np)
-            #            threshold = norm1_sort[int (weight_torch.size()[0] * (1-compress_rate) )]
-            kernel_length = weight_torch.size()[1] * weight_torch.size()[2] * weight_torch.size()[3]
-            for x in range(0, len(filter_index)):
-                codebook[filter_index[x] * kernel_length: (filter_index[x] + 1) * kernel_length] = 0
-
-            print("filter codebook done")
-        else:
-            pass
-        return codebook
-    
-    
-    def get_filter_similar(self, weight_torch, compress_rate, distance_rate, length, dist_type="l2"):
-        codebook = np.ones(length)
-        if len(weight_torch.size()) == 4:
-            filter_pruned_num = int(weight_torch.size()[0] * (1 - compress_rate))
-            similar_pruned_num = int(weight_torch.size()[0] * distance_rate)
-            weight_vec = weight_torch.view(weight_torch.size()[0], -1)
-
+        if len(weights.size()) == 4:
+            filter_pruned_num = int(weights.size()[0] * (1 - compress_rate))
+            similar_pruned_num = int(weights.size()[0] * distance_rate)
+            weight_vec = weights.view(weights.size()[0], -1)
+            '''把该层的每个filter拉成一整条vector'''
             if dist_type == "l2" or "cos":
                 norm = torch.norm(weight_vec, 2, 1)
                 norm_np = norm.cpu().numpy()
             elif dist_type == "l1":
                 norm = torch.norm(weight_vec, 1, 1)
                 norm_np = norm.cpu().numpy()
-            filter_small_index = []
             filter_large_index = []
-            filter_large_index = norm_np.argsort()[filter_pruned_num:]
-            filter_small_index = norm_np.argsort()[:filter_pruned_num]
+            
+            if mix:
+                filter_large_index = norm_np.argsort()[filter_pruned_num:]
+            else:
+                filter_large_index = norm_np.argsort()[:]
 
             indices = torch.LongTensor(filter_large_index).cuda()
             weight_vec_after_norm = torch.index_select(weight_vec, 0, indices).cpu().numpy()
+            '''选取weight_vec第0维的指定index的张量'''
             # for euclidean distance
             if dist_type == "l2" or "l1":
                 similar_matrix = distance.cdist(weight_vec_after_norm, weight_vec_after_norm, 'euclidean')
+                '''计算两个集合中每一对之间的距离'''
             elif dist_type == "cos":  # for cos similarity
                 similar_matrix = 1 - distance.cdist(weight_vec_after_norm, weight_vec_after_norm, 'cosine')
             similar_sum = np.sum(np.abs(similar_matrix), axis=0)
@@ -111,15 +92,16 @@ class GeometricMedian(BaseStrategy):
             similar_index_for_filter = [filter_large_index[i] for i in similar_small_index]
 
             print('filter_large_index', filter_large_index)
-            print('filter_small_index', filter_small_index)
             print('similar_sum', similar_sum)
             print('similar_large_index', similar_large_index)
             print('similar_small_index', similar_small_index)
             print('similar_index_for_filter', similar_index_for_filter)
-            kernel_length = weight_torch.size()[1] * weight_torch.size()[2] * weight_torch.size()[3]
+            kernel_length = weights.size()[1] * weights.size()[2] * weights.size()[3]
+            '''out * w * h'''
             for x in range(0, len(similar_index_for_filter)):
                 codebook[
                 similar_index_for_filter[x] * kernel_length: (similar_index_for_filter[x] + 1) * kernel_length] = 0
+            '''被选中的filter参数在codebook里置0'''
             print("similar index done")
         else:
             pass
@@ -140,8 +122,32 @@ class GeometricMedian(BaseStrategy):
         x = torch.FloatTensor(x)
         return x
     
-    def apply(self, weights, amount=0.0, round_to=1)-> Sequence[int]:  #return index
+    def do_similar_mask(self):
+        for index, item in enumerate(self.model.parameters()):
+            if index in self.mask_index:
+                a = item.data.view(self.model_length[index])
+                b = a * self.similar_matrix[index]
+                item.data = b.view(self.model_size[index])
+        print("mask similar Done")
+        
+    def init_mask(self, rate_norm_per_layer, rate_dist_per_layer, dist_type):
+        self.init_rate(rate_norm_per_layer, rate_dist_per_layer)
+        for index, item in enumerate(self.model.parameters()):
+            if index in self.mask_index:
+                self.similar_matrix[index] = self.get_filter_similar(item.data, self.compress_rate[index],
+                                                                     self.distance_rate[index],
+                                                                     self.model_length[index], dist_type=dist_type)
+                self.similar_matrix[index] = self.convert2tensor(self.similar_matrix[index])
+        print("mask Ready")
+    
+    def apply(self, weights, amount=0.0, round_to=1):
+        indices = []
+        if len(self.model_length) == 0:
+            self.init_length()
+        self.init_mask()
+        self.do_similar_mask(weights, amount)
         return indices
+    
 
 class RandomStrategy(BaseStrategy):
 
